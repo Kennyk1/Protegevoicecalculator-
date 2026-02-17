@@ -1,6 +1,6 @@
 Flask==2.3.3
 requests==2.32.0
 python-dotenv==1.0.0
-supabase==1.6.0
+supabase
 PyJWT==2.8.0
 passlib[bcrypt]==1.7.4
