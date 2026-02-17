@@ -1,9 +1,5 @@
-from flask import Flask, request, jsonify
-from supabase import create_client, Client
-import time
-import requests
-from config import SUPABASE_URL, SUPABASE_KEY, OTP_API_URL, OTP_API_KEY, OTP_EXPIRY_SECONDS
-from utils import generate_otp, hash_password, verify_password, create_jwt
+from flask_otp_api.config import SUPABASE_URL, SUPABASE_KEY, OTP_API_URL, OTP_API_KEY, OTP_EXPIRY_SECONDS
+from flask_otp_api.utils import generate_otp, hash_password, verify_password, create_jwt
 
 app = Flask(__name__)
 
