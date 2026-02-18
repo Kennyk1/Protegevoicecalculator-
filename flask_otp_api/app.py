@@ -1,3 +1,4 @@
+import os
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY, JWT_SECRET, JWT_ALGORITHM
@@ -90,4 +91,5 @@ def login():
 # Run server
 # ------------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
