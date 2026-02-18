@@ -23,6 +23,13 @@ def signup():
     if not phone or not name or not password:
         return jsonify({"success": False, "message": "Phone, name, and password are required"}), 400
 
+    # Limit password to 72 bytes
+    if len(password.encode('utf-8')) > 72:
+        return jsonify({
+            "success": False,
+            "message": "Password cannot exceed 72 characters"
+        }), 400
+
     # Check if user exists
     user_check = supabase.table("users").select("*").eq("phone", phone).execute()
     if user_check.data:
