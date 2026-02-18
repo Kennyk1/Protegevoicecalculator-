@@ -19,15 +19,20 @@ def signup():
     referral = data.get("referral", "")
     password = data.get("password")
 
-    if not phone or not name:
-        return jsonify({"success": False, "message": "Phone and name are required"}), 400
+    # Require all fields
+    if not phone or not name or not password:
+        return jsonify({"success": False, "message": "Phone, name, and password are required"}), 400
 
     # Check if user exists
     user_check = supabase.table("users").select("*").eq("phone", phone).execute()
     if user_check.data:
         return jsonify({"success": False, "message": "User already exists"}), 400
 
-    hashed_password = hash_password(password) if password else None
+    # Hash password safely
+    try:
+        hashed_password = hash_password(password)
+    except Exception as e:
+        return jsonify({"success": False, "message": "Password hashing failed", "error": str(e)}), 500
 
     # Insert user into database
     supabase.table("users").insert({
@@ -53,8 +58,9 @@ def login():
     phone = data.get("phone")
     password = data.get("password")
 
+    # Require both phone and password
     if not phone or not password:
-        return jsonify({"success": False, "message": "Phone and password required"}), 400
+        return jsonify({"success": False, "message": "Phone and password are required"}), 400
 
     # Get user
     user = supabase.table("users").select("*").eq("phone", phone).execute()
@@ -63,10 +69,11 @@ def login():
 
     user = user.data[0]
 
-    # Check password if exists
-    if user.get("password") and not verify_password(password, user["password"]):
+    # Check password
+    if not user.get("password") or not verify_password(password, user["password"]):
         return jsonify({"success": False, "message": "Invalid password"}), 400
 
+    # Generate token
     token = create_jwt({"phone": phone})
 
     return jsonify({"success": True, "token": token})
