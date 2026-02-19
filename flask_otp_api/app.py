@@ -5,6 +5,10 @@ from flask import Flask, request, jsonify
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY
 from utils import create_jwt, decode_jwt
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 app = Flask(__name__)
 
