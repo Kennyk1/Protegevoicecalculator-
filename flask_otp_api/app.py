@@ -498,7 +498,8 @@ def get_withdrawals():
 
 # ══════════════════════════════
 # TRANSFER
-# Body: { "to_phone": "+2348012345678", "amount": 1.00, "pin": "1234", "device_id": "..." }
+# Body: { "to_phone": "...", "amount": 1.00, "pin": "1234", "device_id": "..." }
+# Saves to recent_transfers, returns recipient_name for success screen
 # ══════════════════════════════
 
 @app.route("/api/transfer", methods=["POST"])
@@ -553,18 +554,134 @@ def transfer():
     # Deduct from sender
     new_sender_balance = float(user["balance"]) - amount
     supabase.table("users").update({"balance": new_sender_balance}).eq("id", user["id"]).execute()
-    save_transaction(user["id"], "transfer", -amount, f"Transfer to {recipient['name']} ({to_phone})")
+    save_transaction(
+        user["id"], "transfer", -amount,
+        f"Transfer to {recipient['name']}|{to_phone}"
+    )
 
     # Add to recipient
     new_recipient_balance = float(recipient["balance"]) + amount
     supabase.table("users").update({"balance": new_recipient_balance}).eq("id", recipient["id"]).execute()
-    save_transaction(recipient["id"], "transfer", amount, f"Transfer from {user['name']} ({user['phone']})")
+    save_transaction(
+        recipient["id"], "transfer", amount,
+        f"Transfer from {user['name']}|{user['phone']}"
+    )
+
+    # Save / update recent transfers for sender
+    try:
+        existing = supabase.table("recent_transfers") \
+            .select("*") \
+            .eq("user_id", user["id"]) \
+            .eq("recipient_phone", to_phone) \
+            .execute()
+
+        if existing.data:
+            supabase.table("recent_transfers").update({
+                "last_amount": amount,
+                "recipient_name": recipient["name"],
+                "transfer_count": existing.data[0]["transfer_count"] + 1,
+                "last_transferred_at": "now()"
+            }).eq("id", existing.data[0]["id"]).execute()
+        else:
+            supabase.table("recent_transfers").insert({
+                "user_id": user["id"],
+                "recipient_phone": to_phone,
+                "recipient_name": recipient["name"],
+                "last_amount": amount,
+                "transfer_count": 1
+            }).execute()
+    except Exception as e:
+        print(f"⚠️ Failed to save recent transfer: {e}")
 
     return jsonify({
         "success": True,
-        "message": f"${amount:.2f} transferred to {recipient['name']}",
+        "message": f"${amount:.2f} transferred to {recipient['name']} successfully!",
+        "recipient_name": recipient["name"],
         "new_balance": new_sender_balance
     })
+
+# ══════════════════════════════
+# LOOKUP USER BY PHONE
+# Used by transfer page to show recipient name before confirming
+# GET /api/user-by-phone?phone=+2348012345678
+# ══════════════════════════════
+
+@app.route("/api/user-by-phone", methods=["GET"])
+def user_by_phone():
+    user, error = get_current_user()
+    if error:
+        return jsonify({"success": False, "message": error}), 401
+
+    phone = request.args.get("phone", "").strip()
+    if not phone:
+        return jsonify({"success": False, "message": "Phone number required"}), 400
+
+    if phone == user["phone"]:
+        return jsonify({"success": False, "message": "That's your own number"}), 400
+
+    result = supabase.table("users").select("name, phone").eq("phone", phone).execute()
+    if not result.data:
+        return jsonify({"success": False, "message": "User not found on Protege"}), 404
+
+    return jsonify({
+        "success": True,
+        "name": result.data[0]["name"],
+        "phone": result.data[0]["phone"]
+    })
+
+
+# ══════════════════════════════
+# RECENT TRANSFERS — GET
+# ══════════════════════════════
+
+@app.route("/api/recent-transfers", methods=["GET"])
+def recent_transfers():
+    user, error = get_current_user()
+    if error:
+        return jsonify({"success": False, "message": error}), 401
+
+    try:
+        rows = supabase.table("recent_transfers") \
+            .select("*") \
+            .eq("user_id", user["id"]) \
+            .order("last_transferred_at", desc=True) \
+            .limit(10) \
+            .execute()
+        return jsonify({"success": True, "recent": rows.data})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ══════════════════════════════
+# FULL TRANSACTION HISTORY
+# GET /api/transactions?filter=all|sent|received|withdraw&limit=50
+# ══════════════════════════════
+
+@app.route("/api/transactions", methods=["GET"])
+def transactions():
+    user, error = get_current_user()
+    if error:
+        return jsonify({"success": False, "message": error}), 401
+
+    tx_filter = request.args.get("filter", "all")
+    limit = int(request.args.get("limit", 50))
+
+    try:
+        base = supabase.table("transactions").select("*").eq("user_id", user["id"]).order("created_at", desc=True).limit(limit)
+
+        if tx_filter == "sent":
+            rows = supabase.table("transactions").select("*").eq("user_id", user["id"]).lt("amount", 0).order("created_at", desc=True).limit(limit).execute()
+        elif tx_filter == "received":
+            rows = supabase.table("transactions").select("*").eq("user_id", user["id"]).gt("amount", 0).order("created_at", desc=True).limit(limit).execute()
+        elif tx_filter == "withdraw":
+            rows = supabase.table("transactions").select("*").eq("user_id", user["id"]).eq("type", "withdraw").order("created_at", desc=True).limit(limit).execute()
+        else:
+            rows = base.execute()
+
+        return jsonify({"success": True, "transactions": rows.data})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
 
 # ══════════════════════════════
 # BALANCE
