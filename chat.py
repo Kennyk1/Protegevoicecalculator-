@@ -11,7 +11,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "google/gemini-2.0-flash-exp:free"  # ✅ fixed model name
+MODEL = "meta-llama/llama-3.3-70b-instruct:free"  # my Whatsapp number +2349167583981
 
 SYSTEM_PROMPT = """You are Protege, an AI-powered voice calculator and academic assistant. 
 You specialise in:
