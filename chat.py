@@ -11,7 +11,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "google/gemini-flash-1.5"   # fast + free tier — swap to "openai/gpt-4o" anytime
+MODEL = "google/gemini-2.0-flash-exp:free"  # ✅ fixed model name
 
 SYSTEM_PROMPT = """You are Protege, an AI-powered voice calculator and academic assistant. 
 You specialise in:
@@ -33,6 +33,7 @@ Always format equations and steps clearly. When solving, show:
 3. Step-by-step working
 4. Final answer (highlighted)
 """
+
 def get_user_from_token():
     auth_header = request.headers.get("Authorization")
     if not auth_header:
@@ -58,7 +59,6 @@ def get_history(user_id, limit=20):
             .limit(limit)
             .execute()
         )
-        
         messages = list(reversed(rows.data))
         return messages
     except Exception:
@@ -78,7 +78,7 @@ def call_ai(messages):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://protege-app.com",   # optional but good practice
+        "HTTP-Referer": "https://protege-app.com",
         "X-Title": "Protege AI Calculator"
     }
     payload = {
@@ -108,7 +108,7 @@ def chat():
         return jsonify({"success": False, "message": "Message too long (max 2000 chars)"}), 400
 
     user_id = user["id"]
-    
+
     save_message(user_id, "user", user_message)
 
     history = get_history(user_id, limit=20)
@@ -122,9 +122,9 @@ def chat():
     except requests.exceptions.Timeout:
         return jsonify({"success": False, "message": "AI took too long to respond. Try again."}), 504
     except requests.exceptions.HTTPError as e:
-    print(f"❌ OpenRouter error: {e}")
-    print(f"❌ Response body: {e.response.text}")
-    return jsonify({"success": False, "message": "AI service error. Try again shortly."}), 502
+        print(f"❌ OpenRouter error: {e}")
+        print(f"❌ Response body: {e.response.text}")
+        return jsonify({"success": False, "message": "AI service error. Try again shortly."}), 502
     except Exception as e:
         print(f"❌ Unexpected AI error: {e}")
         return jsonify({"success": False, "message": "Something went wrong. Please try again."}), 500
@@ -137,10 +137,6 @@ def chat():
     })
 
 
-# ══════════════════════════════
-# GET /api/chat/history
-# Returns last 50 messages for the user
-# ══════════════════════════════
 @chat_bp.route("/api/chat/history", methods=["GET"])
 def chat_history():
     user, error = get_user_from_token()
@@ -161,10 +157,6 @@ def chat_history():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ══════════════════════════════
-# DELETE /api/chat/clear
-# Clears all chat history for the user
-# ══════════════════════════════
 @chat_bp.route("/api/chat/clear", methods=["DELETE"])
 def clear_history():
     user, error = get_user_from_token()
@@ -176,3 +168,4 @@ def clear_history():
         return jsonify({"success": True, "message": "Chat history cleared"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+            
