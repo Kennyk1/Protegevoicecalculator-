@@ -16,9 +16,6 @@ print("🚀 APP STARTING...")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ══════════════════════════════
-# HELPERS
-# ══════════════════════════════
 
 def generate_referral_code(length=6):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
@@ -66,17 +63,9 @@ def save_transaction(user_id, tx_type, amount, description):
     except Exception as e:
         print(f"⚠️ Failed to save transaction: {e}")
 
-# ══════════════════════════════
-# HEALTH CHECK
-# ══════════════════════════════
-
 @app.route("/")
 def home():
     return jsonify({"status": "APP RUNNING"})
-
-# ══════════════════════════════
-# SIGNUP
-# ══════════════════════════════
 
 @app.route("/api/signup", methods=["POST"])
 def signup():
@@ -150,10 +139,6 @@ def signup():
         "bonus_applied": give_bonus
     })
 
-# ══════════════════════════════
-# LOGIN
-# ══════════════════════════════
-
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.json
@@ -173,10 +158,6 @@ def login():
     token = create_jwt({"user_id": user["id"]})
     return jsonify({"success": True, "token": token})
 
-# ══════════════════════════════
-# ME / PROFILE
-# ══════════════════════════════
-
 @app.route("/api/me", methods=["GET"])
 def me():
     user, error = get_current_user()
@@ -193,12 +174,6 @@ def me():
             "total_referrals": user["total_referrals"]
         }
     })
-
-# ══════════════════════════════
-# CHANGE NAME
-# Body: { "name": "New Name", "device_id": "..." }
-# Security: must match device_id OR signup_ip
-# ══════════════════════════════
 
 @app.route("/api/change-name", methods=["POST"])
 def change_name():
@@ -226,11 +201,6 @@ def change_name():
 
     return jsonify({"success": True, "message": "Name updated successfully", "name": new_name})
 
-# ══════════════════════════════
-# CHANGE PASSWORD
-# Body: { "old_password": "...", "new_password": "...", "device_id": "..." }
-# Security: must match device_id OR signup_ip + must know old password
-# ══════════════════════════════
 
 @app.route("/api/change-password", methods=["POST"])
 def change_password():
@@ -266,37 +236,6 @@ def change_password():
 
     return jsonify({"success": True, "message": "Password changed successfully"})
 
-# ══════════════════════════════
-# TRANSACTIONS
-# Returns full transaction history for user
-# ══════════════════════════════
-
-@app.route("/api/transactions", methods=["GET"])
-def transactions():
-    user, error = get_current_user()
-    if error:
-        return jsonify({"success": False, "message": error}), 401
-
-    try:
-        rows = (
-            supabase.table("transactions")
-            .select("*")
-            .eq("user_id", user["id"])
-            .order("created_at", desc=True)
-            .limit(50)
-            .execute()
-        )
-        return jsonify({"success": True, "transactions": rows.data})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-# ══════════════════════════════
-# SET WITHDRAWAL PIN
-# Body: { "pin": "1234", "device_id": "..." }
-# Sets a 4-6 digit PIN used to authorize withdrawals and transfers
-# Security: must match device_id OR signup_ip
-# ══════════════════════════════
-
 @app.route("/api/set-withdrawal-pin", methods=["POST"])
 def set_withdrawal_pin():
     user, error = get_current_user()
@@ -326,11 +265,6 @@ def set_withdrawal_pin():
 
     return jsonify({"success": True, "message": "Withdrawal PIN set successfully"})
 
-
-# ══════════════════════════════
-# CHANGE WITHDRAWAL PIN
-# Body: { "old_pin": "1234", "new_pin": "5678", "device_id": "..." }
-# ══════════════════════════════
 
 @app.route("/api/change-withdrawal-pin", methods=["POST"])
 def change_withdrawal_pin():
@@ -369,15 +303,6 @@ def change_withdrawal_pin():
 
     return jsonify({"success": True, "message": "Withdrawal PIN changed successfully"})
 
-
-# ══════════════════════════════
-# WITHDRAW
-# Body: { "amount": 5.00, "method": "usdt_bep20|usdt_trc20|paypal",
-#          "address": "wallet or paypal email", "pin": "1234", "device_id": "..." }
-# Flow: deduct balance immediately → save withdrawal_request as pending
-#       Admin sends money manually → marks completed or rejected
-#       If rejected → balance refunded automatically
-# ══════════════════════════════
 
 @app.route("/api/withdraw", methods=["POST"])
 def withdraw():
@@ -474,10 +399,6 @@ def withdraw():
     })
 
 
-# ══════════════════════════════
-# WITHDRAWAL REQUESTS — GET USER'S OWN
-# ══════════════════════════════
-
 @app.route("/api/withdrawals", methods=["GET"])
 def get_withdrawals():
     user, error = get_current_user()
@@ -495,12 +416,6 @@ def get_withdrawals():
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
-
-# ══════════════════════════════
-# TRANSFER
-# Body: { "to_phone": "...", "amount": 1.00, "pin": "1234", "device_id": "..." }
-# Saves to recent_transfers, returns recipient_name for success screen
-# ══════════════════════════════
 
 @app.route("/api/transfer", methods=["POST"])
 def transfer():
@@ -600,11 +515,6 @@ def transfer():
         "new_balance": new_sender_balance
     })
 
-# ══════════════════════════════
-# LOOKUP USER BY PHONE
-# Used by transfer page to show recipient name before confirming
-# GET /api/user-by-phone?phone=+2348012345678
-# ══════════════════════════════
 
 @app.route("/api/user-by-phone", methods=["GET"])
 def user_by_phone():
@@ -630,10 +540,6 @@ def user_by_phone():
     })
 
 
-# ══════════════════════════════
-# RECENT TRANSFERS — GET
-# ══════════════════════════════
-
 @app.route("/api/recent-transfers", methods=["GET"])
 def recent_transfers():
     user, error = get_current_user()
@@ -651,11 +557,6 @@ def recent_transfers():
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
-
-# ══════════════════════════════
-# FULL TRANSACTION HISTORY
-# GET /api/transactions?filter=all|sent|received|withdraw&limit=50
-# ══════════════════════════════
 
 @app.route("/api/transactions", methods=["GET"])
 def transactions():
@@ -683,10 +584,6 @@ def transactions():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ══════════════════════════════
-# BALANCE
-# ══════════════════════════════
-
 @app.route("/api/balance", methods=["GET"])
 def balance():
     user, error = get_current_user()
@@ -694,18 +591,12 @@ def balance():
         return jsonify({"success": False, "message": error}), 401
     return jsonify({"success": True, "balance": user["balance"]})
 
-# ══════════════════════════════
-# LOGOUT
-# ══════════════════════════════
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
     return jsonify({"success": True, "message": "Logged out successfully"})
 
-# ══════════════════════════════
-# RUN
-# ══════════════════════════════
-
+#Run werey 
 if __name__ == "__main__":
     print("✅ APP RUNNING ON PORT", os.environ.get("PORT", 5000))
     port = int(os.environ.get("PORT", 5000))
