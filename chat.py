@@ -7,15 +7,12 @@ from utils import decode_jwt
 
 chat_bp = Blueprint("chat", __name__)
 
-# Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# OpenRouter config
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "google/gemini-flash-1.5"   # fast + free tier — swap to "openai/gpt-4o" anytime
 
-# System prompt — this defines Protege's personality
 SYSTEM_PROMPT = """You are Protege, an AI-powered voice calculator and academic assistant. 
 You specialise in:
 - Mathematics (basic arithmetic, algebra, calculus, statistics, further maths)
@@ -36,8 +33,6 @@ Always format equations and steps clearly. When solving, show:
 3. Step-by-step working
 4. Final answer (highlighted)
 """
-
-# ── Helper: get user from JWT ──
 def get_user_from_token():
     auth_header = request.headers.get("Authorization")
     if not auth_header:
@@ -53,8 +48,6 @@ def get_user_from_token():
     except Exception:
         return None, "Invalid token"
 
-
-# ── Helper: fetch last N messages for context ──
 def get_history(user_id, limit=20):
     try:
         rows = (
@@ -65,14 +58,12 @@ def get_history(user_id, limit=20):
             .limit(limit)
             .execute()
         )
-        # Reverse so oldest first (correct order for AI context)
+        
         messages = list(reversed(rows.data))
         return messages
     except Exception:
         return []
 
-
-# ── Helper: save message to Supabase ──
 def save_message(user_id, role, content):
     try:
         supabase.table("conversations").insert({
@@ -83,8 +74,6 @@ def save_message(user_id, role, content):
     except Exception as e:
         print(f"⚠️ Failed to save message: {e}")
 
-
-# ── Helper: call OpenRouter AI ──
 def call_ai(messages):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -96,18 +85,13 @@ def call_ai(messages):
         "model": MODEL,
         "messages": messages,
         "max_tokens": 1024,
-        "temperature": 0.3    # lower = more accurate/mathematical
+        "temperature": 0.3
     }
     response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=30)
     response.raise_for_status()
     data = response.json()
     return data["choices"][0]["message"]["content"]
 
-
-# ══════════════════════════════
-# POST /api/chat
-# Body: { "message": "solve x^2 + 5x + 6 = 0" }
-# ══════════════════════════════
 @chat_bp.route("/api/chat", methods=["POST"])
 def chat():
     user, error = get_user_from_token()
@@ -124,30 +108,27 @@ def chat():
         return jsonify({"success": False, "message": "Message too long (max 2000 chars)"}), 400
 
     user_id = user["id"]
-
-    # 1. Save user message to Supabase
+    
     save_message(user_id, "user", user_message)
 
-    # 2. Build message history for AI context
     history = get_history(user_id, limit=20)
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for h in history:
         messages.append({"role": h["role"], "content": h["content"]})
 
-    # 3. Call AI
     try:
         reply = call_ai(messages)
     except requests.exceptions.Timeout:
         return jsonify({"success": False, "message": "AI took too long to respond. Try again."}), 504
     except requests.exceptions.HTTPError as e:
-        print(f"❌ OpenRouter error: {e}")
-        return jsonify({"success": False, "message": "AI service error. Try again shortly."}), 502
+    print(f"❌ OpenRouter error: {e}")
+    print(f"❌ Response body: {e.response.text}")
+    return jsonify({"success": False, "message": "AI service error. Try again shortly."}), 502
     except Exception as e:
         print(f"❌ Unexpected AI error: {e}")
         return jsonify({"success": False, "message": "Something went wrong. Please try again."}), 500
 
-    # 4. Save AI reply to Supabase
     save_message(user_id, "assistant", reply)
 
     return jsonify({
