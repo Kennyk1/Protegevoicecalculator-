@@ -16,6 +16,8 @@ print("🚀 APP STARTING...")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# ── USD to NGN rate (update this manually or connect to live API later) ──
+USD_TO_NGN = 1600
 
 def generate_referral_code(length=6):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
@@ -38,21 +40,7 @@ def get_current_user():
 def get_request_ip():
     return request.headers.get("X-Forwarded-For", request.remote_addr)
 
-def verify_device_or_ip(user):
-    """
-    Returns True if the request comes from the same device OR same IP as signup.
-    This protects sensitive actions like change-password, change-name.
-    """
-    request_ip = get_request_ip()
-    request_device = request.json.get("device_id") if request.json else None
-
-    ip_match = user.get("signup_ip") and user["signup_ip"] == request_ip
-    device_match = request_device and user.get("device_id") and user["device_id"] == request_device
-
-    return ip_match or device_match
-
 def save_transaction(user_id, tx_type, amount, description):
-    """Save a transaction record to Supabase."""
     try:
         supabase.table("transactions").insert({
             "user_id": user_id,
@@ -66,6 +54,19 @@ def save_transaction(user_id, tx_type, amount, description):
 @app.route("/")
 def home():
     return jsonify({"status": "APP RUNNING"})
+
+# ══════════════════════════════
+# USD → NGN RATE
+# GET /api/rate
+# ══════════════════════════════
+
+@app.route("/api/rate", methods=["GET"])
+def get_rate():
+    return jsonify({"success": True, "usd_to_ngn": USD_TO_NGN})
+
+# ══════════════════════════════
+# SIGNUP
+# ══════════════════════════════
 
 @app.route("/api/signup", methods=["POST"])
 def signup():
@@ -118,19 +119,15 @@ def signup():
     user_id = user["id"]
 
     if give_bonus and referrer_user:
-        # Give referrer $0.10
         supabase.table("users").update({
             "balance": float(referrer_user["balance"]) + 0.1,
             "total_referrals": referrer_user["total_referrals"] + 1
         }).eq("id", referrer_user["id"]).execute()
         save_transaction(referrer_user["id"], "referral_bonus", 0.10, f"Referral bonus — {name} joined")
-
-        # Give new user $0.50 signup bonus
         supabase.table("users").update({"balance": 0.5}).eq("id", user_id).execute()
         save_transaction(user_id, "signup_bonus", 0.50, f"Welcome bonus — joined with referral code {referral_input}")
 
     token = create_jwt({"user_id": user_id})
-
     return jsonify({
         "success": True,
         "message": "Registered successfully",
@@ -138,6 +135,10 @@ def signup():
         "referral_code": my_code,
         "bonus_applied": give_bonus
     })
+
+# ══════════════════════════════
+# LOGIN
+# ══════════════════════════════
 
 @app.route("/api/login", methods=["POST"])
 def login():
@@ -158,6 +159,10 @@ def login():
     token = create_jwt({"user_id": user["id"]})
     return jsonify({"success": True, "token": token})
 
+# ══════════════════════════════
+# ME
+# ══════════════════════════════
+
 @app.route("/api/me", methods=["GET"])
 def me():
     user, error = get_current_user()
@@ -175,6 +180,10 @@ def me():
         }
     })
 
+# ══════════════════════════════
+# CHANGE NAME
+# ══════════════════════════════
+
 @app.route("/api/change-name", methods=["POST"])
 def change_name():
     user, error = get_current_user()
@@ -186,21 +195,15 @@ def change_name():
 
     if not new_name or len(new_name) < 2:
         return jsonify({"success": False, "message": "Name must be at least 2 characters"}), 400
-
     if len(new_name) > 50:
         return jsonify({"success": False, "message": "Name too long (max 50 characters)"}), 400
 
-    # Security check — must be same device or IP
-    if not verify_device_or_ip(user):
-        return jsonify({
-            "success": False,
-            "message": "Security check failed. This action must be done from your original device."
-        }), 403
-
     supabase.table("users").update({"name": new_name}).eq("id", user["id"]).execute()
+    return jsonify({"success": True, "message": "Name updated successfully"})
 
-    return jsonify({"success": True, "message": "Name updated successfully", "name": new_name})
-
+# ══════════════════════════════
+# CHANGE PASSWORD
+# ══════════════════════════════
 
 @app.route("/api/change-password", methods=["POST"])
 def change_password():
@@ -209,32 +212,22 @@ def change_password():
         return jsonify({"success": False, "message": error}), 401
 
     data = request.json
-    old_password = data.get("old_password", "")
-    new_password = data.get("new_password", "")
+    old_password = data.get("old_password", "").strip()
+    new_password = data.get("new_password", "").strip()
 
     if not old_password or not new_password:
         return jsonify({"success": False, "message": "Old and new password required"}), 400
-
-    if len(new_password) < 8:
-        return jsonify({"success": False, "message": "New password must be at least 8 characters"}), 400
-
-    if old_password == new_password:
-        return jsonify({"success": False, "message": "New password must be different from old password"}), 400
-
-    # Security check 1 — must be same device or IP
-    if not verify_device_or_ip(user):
-        return jsonify({
-            "success": False,
-            "message": "Security check failed. Password can only be changed from your original device."
-        }), 403
-
-    # Security check 2 — must know old password
+    if len(new_password) < 6:
+        return jsonify({"success": False, "message": "New password must be at least 6 characters"}), 400
     if user["password"] != old_password:
         return jsonify({"success": False, "message": "Current password is incorrect"}), 400
 
     supabase.table("users").update({"password": new_password}).eq("id", user["id"]).execute()
-
     return jsonify({"success": True, "message": "Password changed successfully"})
+
+# ══════════════════════════════
+# SET WITHDRAWAL PIN
+# ══════════════════════════════
 
 @app.route("/api/set-withdrawal-pin", methods=["POST"])
 def set_withdrawal_pin():
@@ -245,26 +238,15 @@ def set_withdrawal_pin():
     data = request.json
     pin = str(data.get("pin", "")).strip()
 
-    if not pin:
-        return jsonify({"success": False, "message": "PIN is required"}), 400
-
-    if not pin.isdigit():
-        return jsonify({"success": False, "message": "PIN must be numbers only"}), 400
-
-    if len(pin) < 4 or len(pin) > 6:
+    if not pin or not pin.isdigit() or len(pin) < 4 or len(pin) > 6:
         return jsonify({"success": False, "message": "PIN must be 4 to 6 digits"}), 400
 
-    # Security check — must be same device or IP
-    if not verify_device_or_ip(user):
-        return jsonify({
-            "success": False,
-            "message": "Security check failed. PIN can only be set from your original device."
-        }), 403
-
     supabase.table("users").update({"withdrawal_pin": pin}).eq("id", user["id"]).execute()
-
     return jsonify({"success": True, "message": "Withdrawal PIN set successfully"})
 
+# ══════════════════════════════
+# CHANGE WITHDRAWAL PIN
+# ══════════════════════════════
 
 @app.route("/api/change-withdrawal-pin", methods=["POST"])
 def change_withdrawal_pin():
@@ -278,31 +260,24 @@ def change_withdrawal_pin():
 
     if not old_pin or not new_pin:
         return jsonify({"success": False, "message": "Old and new PIN required"}), 400
-
     if not new_pin.isdigit() or len(new_pin) < 4 or len(new_pin) > 6:
         return jsonify({"success": False, "message": "New PIN must be 4 to 6 digits"}), 400
-
     if old_pin == new_pin:
         return jsonify({"success": False, "message": "New PIN must be different from old PIN"}), 400
-
-    # Security check
-    if not verify_device_or_ip(user):
-        return jsonify({
-            "success": False,
-            "message": "Security check failed. PIN can only be changed from your original device."
-        }), 403
-
-    # Verify old PIN
     if not user.get("withdrawal_pin"):
         return jsonify({"success": False, "message": "No withdrawal PIN set yet. Please set one first."}), 400
-
     if user["withdrawal_pin"] != old_pin:
         return jsonify({"success": False, "message": "Current PIN is incorrect"}), 400
 
     supabase.table("users").update({"withdrawal_pin": new_pin}).eq("id", user["id"]).execute()
-
     return jsonify({"success": True, "message": "Withdrawal PIN changed successfully"})
 
+# ══════════════════════════════
+# WITHDRAW
+# PIN-only security (no device/IP check — too strict on redeploy)
+# Body: { "amount": 5.00, "method": "...", "address": "...", 
+#         "account_name": "...(NGN only)", "pin": "1234", "currency": "usd|ngn" }
+# ══════════════════════════════
 
 @app.route("/api/withdraw", methods=["POST"])
 def withdraw():
@@ -311,111 +286,113 @@ def withdraw():
         return jsonify({"success": False, "message": error}), 401
 
     data = request.json
-    amount = float(data.get("amount", 0))
+    amount_raw = float(data.get("amount", 0))
     method = data.get("method", "").strip()
     address = data.get("address", "").strip()
+    account_name = data.get("account_name", "").strip()
     pin = str(data.get("pin", "")).strip()
+    currency = data.get("currency", "usd")  # "usd" or "ngn"
 
-    # ── Validations ──
-    if amount <= 0:
+    # Convert NGN amount to USD for balance deduction
+    if currency == "ngn":
+        amount_usd = amount_raw / USD_TO_NGN
+    else:
+        amount_usd = amount_raw
+
+    if amount_usd <= 0:
         return jsonify({"success": False, "message": "Invalid amount"}), 400
 
-    if amount < 1.00:
-        return jsonify({"success": False, "message": "Minimum withdrawal is $1.00"}), 400
+    if amount_usd < 1.0:
+        return jsonify({"success": False, "message": "Minimum withdrawal is $1.00 (₦{:,.0f})".format(USD_TO_NGN)}), 400
 
-    if float(user["balance"]) < amount:
+    if float(user["balance"]) < amount_usd:
         return jsonify({"success": False, "message": "Insufficient balance"}), 400
 
-    valid_methods = ['usdt_bep20', 'usdt_trc20', 'paypal']
+    valid_methods = ['usdt_bep20', 'usdt_trc20', 'paypal', 'ngn_opay', 'ngn_palmpay']
     if method not in valid_methods:
-        return jsonify({"success": False, "message": "Invalid withdrawal method"}), 400
+        return jsonify({"success": False, "message": f"Invalid withdrawal method: {method}"}), 400
 
     if not address:
-        return jsonify({"success": False, "message": "Wallet address or PayPal email is required"}), 400
+        return jsonify({"success": False, "message": "Wallet address or account number is required"}), 400
 
-    # ── Security check 1 — device or IP ──
-    if not verify_device_or_ip(user):
-        return jsonify({
-            "success": False,
-            "message": "Security check failed. Withdrawal must be done from your registered device."
-        }), 403
+    # NGN methods require account name
+    if method in ['ngn_opay', 'ngn_palmpay'] and not account_name:
+        return jsonify({"success": False, "message": "Account name is required for NGN withdrawal"}), 400
 
-    # ── Security check 2 — withdrawal PIN ──
+    # PIN check
     if not user.get("withdrawal_pin"):
-        return jsonify({
-            "success": False,
-            "message": "Please set a withdrawal PIN in Settings before withdrawing."
-        }), 403
-
+        return jsonify({"success": False, "message": "Please set a withdrawal PIN in Settings before withdrawing."}), 403
     if not pin:
         return jsonify({"success": False, "message": "Withdrawal PIN is required"}), 400
-
     if user["withdrawal_pin"] != pin:
         return jsonify({"success": False, "message": "Incorrect withdrawal PIN"}), 403
 
-    # ── Check no other pending request exists ──
-    pending = supabase.table("withdrawal_requests") \
-        .select("id") \
-        .eq("user_id", user["id"]) \
-        .eq("status", "pending") \
-        .execute()
+    # Block duplicate pending
+    pending = supabase.table("withdrawal_requests").select("id").eq("user_id", user["id"]).eq("status", "pending").execute()
     if pending.data:
-        return jsonify({
-            "success": False,
-            "message": "You already have a pending withdrawal. Please wait for it to be processed."
-        }), 400
+        return jsonify({"success": False, "message": "You already have a pending withdrawal. Please wait for it to be processed."}), 400
 
-    # ── Deduct balance immediately ──
-    new_balance = float(user["balance"]) - amount
-    supabase.table("users").update({"balance": new_balance}).eq("id", user["id"]).execute()
+    # Apply 20% fee for NGN
+    fee_usd = 0
+    if method in ['ngn_opay', 'ngn_palmpay']:
+        fee_usd = round(amount_usd * 0.20, 4)
+        net_usd = amount_usd - fee_usd
+    else:
+        net_usd = amount_usd
 
-    # ── Save to withdrawal_requests table (admin will process this) ──
     method_label = {
         'usdt_bep20': 'USDT (BEP-20)',
         'usdt_trc20': 'USDT (TRC-20)',
-        'paypal': 'PayPal'
+        'paypal': 'PayPal',
+        'ngn_opay': 'OPay (NGN)',
+        'ngn_palmpay': 'PalmPay (NGN)'
     }.get(method, method)
 
+    # Deduct balance
+    new_balance = float(user["balance"]) - amount_usd
+    supabase.table("users").update({"balance": new_balance}).eq("id", user["id"]).execute()
+
+    # Save withdrawal request
     supabase.table("withdrawal_requests").insert({
         "user_id": user["id"],
-        "amount": amount,
+        "amount": amount_usd,
         "method": method,
         "address": address,
+        "account_name": account_name if account_name else None,
         "status": "pending"
     }).execute()
 
-    # ── Save to transaction history ──
-    save_transaction(
-        user["id"],
-        "withdraw",
-        -amount,
-        f"Withdrawal via {method_label} to {address} — pending"
-    )
+    # Save transaction
+    desc = f"Withdrawal via {method_label} to {account_name + ' | ' if account_name else ''}{address}"
+    save_transaction(user["id"], "withdraw", -amount_usd, desc)
 
     return jsonify({
         "success": True,
-        "message": f"Withdrawal request submitted! ${amount:.2f} will be sent to your {method_label} address within 24 hours.",
-        "new_balance": new_balance
+        "message": f"Withdrawal of {currency.upper()} {'₦{:,.0f}'.format(amount_raw) if currency == 'ngn' else '${:.2f}'.format(amount_raw)} submitted! Funds arrive within 24 hours.",
+        "new_balance": new_balance,
+        "fee_usd": fee_usd,
+        "net_usd": net_usd
     })
 
+# ══════════════════════════════
+# USER'S WITHDRAWAL REQUESTS
+# ══════════════════════════════
 
 @app.route("/api/withdrawals", methods=["GET"])
 def get_withdrawals():
     user, error = get_current_user()
     if error:
         return jsonify({"success": False, "message": error}), 401
-
     try:
-        rows = supabase.table("withdrawal_requests") \
-            .select("*") \
-            .eq("user_id", user["id"]) \
-            .order("created_at", desc=True) \
-            .limit(20) \
-            .execute()
+        rows = supabase.table("withdrawal_requests").select("*").eq("user_id", user["id"]).order("created_at", desc=True).limit(20).execute()
         return jsonify({"success": True, "withdrawals": rows.data})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
+# ══════════════════════════════
+# TRANSFER
+# PIN-only security (no device/IP check)
+# ══════════════════════════════
 
 @app.route("/api/transfer", methods=["POST"])
 def transfer():
@@ -430,66 +407,35 @@ def transfer():
 
     if amount <= 0:
         return jsonify({"success": False, "message": "Invalid amount"}), 400
-
     if float(user["balance"]) < amount:
         return jsonify({"success": False, "message": "Insufficient balance"}), 400
-
     if not to_phone:
         return jsonify({"success": False, "message": "Recipient phone number required"}), 400
-
     if to_phone == user["phone"]:
         return jsonify({"success": False, "message": "Cannot transfer to yourself"}), 400
 
-    # Security check 1 — device or IP
-    if not verify_device_or_ip(user):
-        return jsonify({
-            "success": False,
-            "message": "Security check failed. Transfer must be done from your original device."
-        }), 403
-
-    # Security check 2 — withdrawal PIN
     if not user.get("withdrawal_pin"):
-        return jsonify({
-            "success": False,
-            "message": "Please set a withdrawal PIN in Settings before transferring."
-        }), 403
-
+        return jsonify({"success": False, "message": "Please set a withdrawal PIN in Settings before transferring."}), 403
     if not pin:
         return jsonify({"success": False, "message": "Withdrawal PIN is required"}), 400
-
     if user["withdrawal_pin"] != pin:
         return jsonify({"success": False, "message": "Incorrect withdrawal PIN"}), 403
 
-    # Find recipient
     recipient = supabase.table("users").select("*").eq("phone", to_phone).execute()
     if not recipient.data:
         return jsonify({"success": False, "message": "Recipient not found. Check the phone number."}), 404
     recipient = recipient.data[0]
 
-    # Deduct from sender
     new_sender_balance = float(user["balance"]) - amount
     supabase.table("users").update({"balance": new_sender_balance}).eq("id", user["id"]).execute()
-    save_transaction(
-        user["id"], "transfer", -amount,
-        f"Transfer to {recipient['name']}|{to_phone}"
-    )
+    save_transaction(user["id"], "transfer", -amount, f"Transfer to {recipient['name']}|{to_phone}")
 
-    # Add to recipient
     new_recipient_balance = float(recipient["balance"]) + amount
     supabase.table("users").update({"balance": new_recipient_balance}).eq("id", recipient["id"]).execute()
-    save_transaction(
-        recipient["id"], "transfer", amount,
-        f"Transfer from {user['name']}|{user['phone']}"
-    )
+    save_transaction(recipient["id"], "transfer", amount, f"Transfer from {user['name']}|{user['phone']}")
 
-    # Save / update recent transfers for sender
     try:
-        existing = supabase.table("recent_transfers") \
-            .select("*") \
-            .eq("user_id", user["id"]) \
-            .eq("recipient_phone", to_phone) \
-            .execute()
-
+        existing = supabase.table("recent_transfers").select("*").eq("user_id", user["id"]).eq("recipient_phone", to_phone).execute()
         if existing.data:
             supabase.table("recent_transfers").update({
                 "last_amount": amount,
@@ -515,6 +461,9 @@ def transfer():
         "new_balance": new_sender_balance
     })
 
+# ══════════════════════════════
+# LOOKUP USER BY PHONE
+# ══════════════════════════════
 
 @app.route("/api/user-by-phone", methods=["GET"])
 def user_by_phone():
@@ -525,7 +474,6 @@ def user_by_phone():
     phone = request.args.get("phone", "").strip()
     if not phone:
         return jsonify({"success": False, "message": "Phone number required"}), 400
-
     if phone == user["phone"]:
         return jsonify({"success": False, "message": "That's your own number"}), 400
 
@@ -533,30 +481,26 @@ def user_by_phone():
     if not result.data:
         return jsonify({"success": False, "message": "User not found on Protege"}), 404
 
-    return jsonify({
-        "success": True,
-        "name": result.data[0]["name"],
-        "phone": result.data[0]["phone"]
-    })
+    return jsonify({"success": True, "name": result.data[0]["name"], "phone": result.data[0]["phone"]})
 
+# ══════════════════════════════
+# RECENT TRANSFERS
+# ══════════════════════════════
 
 @app.route("/api/recent-transfers", methods=["GET"])
 def recent_transfers():
     user, error = get_current_user()
     if error:
         return jsonify({"success": False, "message": error}), 401
-
     try:
-        rows = supabase.table("recent_transfers") \
-            .select("*") \
-            .eq("user_id", user["id"]) \
-            .order("last_transferred_at", desc=True) \
-            .limit(10) \
-            .execute()
+        rows = supabase.table("recent_transfers").select("*").eq("user_id", user["id"]).order("last_transferred_at", desc=True).limit(10).execute()
         return jsonify({"success": True, "recent": rows.data})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
+# ══════════════════════════════
+# TRANSACTIONS
+# ══════════════════════════════
 
 @app.route("/api/transactions", methods=["GET"])
 def transactions():
@@ -568,8 +512,6 @@ def transactions():
     limit = int(request.args.get("limit", 50))
 
     try:
-        base = supabase.table("transactions").select("*").eq("user_id", user["id"]).order("created_at", desc=True).limit(limit)
-
         if tx_filter == "sent":
             rows = supabase.table("transactions").select("*").eq("user_id", user["id"]).lt("amount", 0).order("created_at", desc=True).limit(limit).execute()
         elif tx_filter == "received":
@@ -577,12 +519,15 @@ def transactions():
         elif tx_filter == "withdraw":
             rows = supabase.table("transactions").select("*").eq("user_id", user["id"]).eq("type", "withdraw").order("created_at", desc=True).limit(limit).execute()
         else:
-            rows = base.execute()
+            rows = supabase.table("transactions").select("*").eq("user_id", user["id"]).order("created_at", desc=True).limit(limit).execute()
 
         return jsonify({"success": True, "transactions": rows.data})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
+# ══════════════════════════════
+# BALANCE
+# ══════════════════════════════
 
 @app.route("/api/balance", methods=["GET"])
 def balance():
@@ -591,12 +536,15 @@ def balance():
         return jsonify({"success": False, "message": error}), 401
     return jsonify({"success": True, "balance": user["balance"]})
 
+# ══════════════════════════════
+# LOGOUT
+# ══════════════════════════════
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
     return jsonify({"success": True, "message": "Logged out successfully"})
 
-#Run werey 
+# Run
 if __name__ == "__main__":
     print("✅ APP RUNNING ON PORT", os.environ.get("PORT", 5000))
     port = int(os.environ.get("PORT", 5000))
