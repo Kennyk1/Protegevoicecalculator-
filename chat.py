@@ -73,27 +73,34 @@ def save_message(user_id, role, content):
     except Exception as e:
         print(f"⚠️ Failed to save message: {e}")
 
-# --- Updated to use Google Gemini while keeping OPENROUTER_API_KEY ---
 def call_ai(messages):
-    # Combine messages into a single prompt
-    prompt = "\n".join([m["content"] for m in messages])
-    
+    formatted_contents = []
+    for m in messages:
+        role = "user" if m["role"] == "user" else "model"
+        formatted_contents.append({
+            "role": role,
+            "parts": [{"text": m["content"]}]
+        })
+
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "temperature": 0.3,
-        "candidate_count": 1
+        "contents": formatted_contents,
+        "generationConfig": {
+            "maxOutputTokens": 1024,
+            "temperature": 0.7
+        }
     }
 
     GOOGLE_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-
+    
     response = requests.post(
-        f"{GOOGLE_GEMINI_URL}?key={OPENROUTER_API_KEY}",  # still using OPENROUTER_API_KEY
+        f"{GOOGLE_GEMINI_URL}?key={OPENROUTER_API_KEY}",
         headers={"Content-Type": "application/json"},
         json=payload,
         timeout=30
     )
     response.raise_for_status()
     data = response.json()
+    
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 # --- Routes ---
