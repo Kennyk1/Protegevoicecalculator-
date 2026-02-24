@@ -3,12 +3,12 @@ from flask import Blueprint, request, jsonify
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY
 from utils import decode_jwt
-from google import genai  # Make sure google-genai is in requirements.txt
+from google import genai
+from google.genai import types
 
 chat_bp = Blueprint("chat", __name__)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Keep the env variable name as OPENROUTER_API_KEY
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 SYSTEM_PROMPT = """You are Protege, an AI-powered voice calculator and academic assistant. 
@@ -77,23 +77,25 @@ def save_message(user_id, role, content):
 def call_ai(messages):
     """
     Uses Google Gemini to generate a response.
-    Keeps messages separate and encodes role in text.
+    Fixed to use correct google-genai SDK syntax.
     """
     client = genai.Client(api_key=OPENROUTER_API_KEY)
 
-    # Build contents list with roles
-    contents = [{"text": f"SYSTEM: {SYSTEM_PROMPT}"}]  # Always include system prompt first
+    contents = []
     for m in messages:
-        role_label = "USER" if m["role"] == "user" else "ASSISTANT"
-        contents.append({"text": f"{role_label}: {m['content']}"})
-
+        
+        role = "user" if m["role"] == "user" else "model"
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m["content"])])
     response = client.models.generate_content(
-        model="gemini-3-flash-preview",  # Use a valid Gemini model
+        model="gemini-2.0-flash", 
         contents=contents,
-        max_output_tokens=1024
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            max_output_tokens=1024,
+            temperature=0.7
+        )
     )
 
-    # Gemini response text is under response.text
     return response.text
 
 # --- Routes ---
@@ -119,6 +121,7 @@ def chat():
     try:
         reply = call_ai(history)
     except Exception as e:
+        
         print(f"❌ AI error: {e}")
         return jsonify({"success": False, "message": "AI service error. Try again shortly."}), 502
 
