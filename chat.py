@@ -85,7 +85,7 @@ def call_ai(messages):
     for m in messages:
         
         role = "user" if m["role"] == "user" else "model"
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m["content"])])
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m["content"])]))
     response = client.models.generate_content(
         model="gemini-2.0-flash", 
         contents=contents,
