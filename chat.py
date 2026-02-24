@@ -3,7 +3,7 @@ from flask import Blueprint, request, jsonify
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY
 from utils import decode_jwt
-from google import genai  # Official Google Gemini client
+from google import genai  # Make sure google-genai is in requirements.txt
 
 chat_bp = Blueprint("chat", __name__)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -32,7 +32,7 @@ Always format equations and steps clearly. When solving, show:
 4. Final answer (highlighted)
 """
 
-# --- Helper functions ---
+# --- Helpers ---
 def get_user_from_token():
     auth_header = request.headers.get("Authorization")
     if not auth_header:
@@ -58,7 +58,8 @@ def get_history(user_id, limit=20):
             .limit(limit)
             .execute()
         )
-        return list(reversed(rows.data))
+        messages = list(reversed(rows.data))
+        return messages
     except Exception:
         return []
 
@@ -72,24 +73,27 @@ def save_message(user_id, role, content):
     except Exception as e:
         print(f"⚠️ Failed to save message: {e}")
 
-# --- Call Google Gemini ---
+# --- AI Call ---
 def call_ai(messages):
+    """
+    Uses Google Gemini to generate a response.
+    Keeps messages separate and encodes role in text.
+    """
     client = genai.Client(api_key=OPENROUTER_API_KEY)
 
-    # Convert messages to a single string for Gemini
-    chat_input = SYSTEM_PROMPT + "\n\n"
+    # Build contents list with roles
+    contents = [{"text": f"SYSTEM: {SYSTEM_PROMPT}"}]  # Always include system prompt first
     for m in messages:
-        role_label = "User" if m["role"] == "user" else "Assistant"
-        chat_input += f"{role_label}: {m['content']}\n"
+        role_label = "USER" if m["role"] == "user" else "ASSISTANT"
+        contents.append({"text": f"{role_label}: {m['content']}"})
 
     response = client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=chat_input,
-        temperature=0.7,
+        model="gemini-3-flash-preview",  # Use a valid Gemini model
+        contents=contents,
         max_output_tokens=1024
     )
 
-    # Gemini returns text directly
+    # Gemini response text is under response.text
     return response.text
 
 # --- Routes ---
@@ -101,6 +105,7 @@ def chat():
 
     data = request.json
     user_message = data.get("message", "").strip()
+
     if not user_message:
         return jsonify({"success": False, "message": "Message is required"}), 400
     if len(user_message) > 2000:
@@ -110,15 +115,15 @@ def chat():
     save_message(user_id, "user", user_message)
 
     history = get_history(user_id, limit=20)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
 
     try:
-        reply = call_ai(messages)
+        reply = call_ai(history)
     except Exception as e:
         print(f"❌ AI error: {e}")
-        return jsonify({"success": False, "message": "AI service error. Try again."}), 502
+        return jsonify({"success": False, "message": "AI service error. Try again shortly."}), 502
 
     save_message(user_id, "assistant", reply)
+
     return jsonify({"success": True, "reply": reply})
 
 @chat_bp.route("/api/chat/history", methods=["GET"])
