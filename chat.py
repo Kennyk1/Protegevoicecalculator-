@@ -1,12 +1,11 @@
 import os
-import requests
 from flask import Blueprint, request, jsonify
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY
 from utils import decode_jwt
+from google import genai  # Official Google Gemini client
 
 chat_bp = Blueprint("chat", __name__)
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Keep the env variable name as OPENROUTER_API_KEY
@@ -33,6 +32,7 @@ Always format equations and steps clearly. When solving, show:
 4. Final answer (highlighted)
 """
 
+# --- Helper functions ---
 def get_user_from_token():
     auth_header = request.headers.get("Authorization")
     if not auth_header:
@@ -58,8 +58,7 @@ def get_history(user_id, limit=20):
             .limit(limit)
             .execute()
         )
-        messages = list(reversed(rows.data))
-        return messages
+        return list(reversed(rows.data))
     except Exception:
         return []
 
@@ -73,35 +72,25 @@ def save_message(user_id, role, content):
     except Exception as e:
         print(f"⚠️ Failed to save message: {e}")
 
+# --- Call Google Gemini ---
 def call_ai(messages):
-    formatted_contents = []
+    client = genai.Client(api_key=OPENROUTER_API_KEY)
+
+    # Convert messages to a single string for Gemini
+    chat_input = SYSTEM_PROMPT + "\n\n"
     for m in messages:
-        role = "user" if m["role"] == "user" else "model"
-        formatted_contents.append({
-            "role": role,
-            "parts": [{"text": m["content"]}]
-        })
+        role_label = "User" if m["role"] == "user" else "Assistant"
+        chat_input += f"{role_label}: {m['content']}\n"
 
-    payload = {
-        "contents": formatted_contents,
-        "generationConfig": {
-            "maxOutputTokens": 1024,
-            "temperature": 0.7
-        }
-    }
-
-    GOOGLE_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-    
-    response = requests.post(
-        f"{GOOGLE_GEMINI_URL}?key={OPENROUTER_API_KEY}",
-        headers={"Content-Type": "application/json"},
-        json=payload,
-        timeout=30
+    response = client.models.generate_content(
+        model="gemini-3-flash-preview",
+        contents=chat_input,
+        temperature=0.7,
+        max_output_tokens=1024
     )
-    response.raise_for_status()
-    data = response.json()
-    
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    # Gemini returns text directly
+    return response.text
 
 # --- Routes ---
 @chat_bp.route("/api/chat", methods=["POST"])
@@ -112,10 +101,8 @@ def chat():
 
     data = request.json
     user_message = data.get("message", "").strip()
-
     if not user_message:
         return jsonify({"success": False, "message": "Message is required"}), 400
-
     if len(user_message) > 2000:
         return jsonify({"success": False, "message": "Message too long (max 2000 chars)"}), 400
 
@@ -123,24 +110,15 @@ def chat():
     save_message(user_id, "user", user_message)
 
     history = get_history(user_id, limit=20)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for h in history:
-        messages.append({"role": h["role"], "content": h["content"]})
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
 
     try:
         reply = call_ai(messages)
-    except requests.exceptions.Timeout:
-        return jsonify({"success": False, "message": "AI took too long to respond. Try again."}), 504
-    except requests.exceptions.HTTPError as e:
-        print(f"❌ AI error: {e}")
-        print(f"❌ Response body: {e.response.text}")
-        return jsonify({"success": False, "message": "AI service error. Try again shortly."}), 502
     except Exception as e:
-        print(f"❌ Unexpected AI error: {e}")
-        return jsonify({"success": False, "message": "Something went wrong. Please try again."}), 500
+        print(f"❌ AI error: {e}")
+        return jsonify({"success": False, "message": "AI service error. Try again."}), 502
 
     save_message(user_id, "assistant", reply)
-
     return jsonify({"success": True, "reply": reply})
 
 @chat_bp.route("/api/chat/history", methods=["GET"])
@@ -148,7 +126,6 @@ def chat_history():
     user, error = get_user_from_token()
     if error:
         return jsonify({"success": False, "message": error}), 401
-
     try:
         rows = (
             supabase.table("conversations")
@@ -167,7 +144,6 @@ def clear_history():
     user, error = get_user_from_token()
     if error:
         return jsonify({"success": False, "message": error}), 401
-
     try:
         supabase.table("conversations").delete().eq("user_id", user["id"]).execute()
         return jsonify({"success": True, "message": "Chat history cleared"})
