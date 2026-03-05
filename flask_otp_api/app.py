@@ -7,6 +7,8 @@ from config import SUPABASE_URL, SUPABASE_KEY
 from utils import create_jwt, decode_jwt
 from flask_cors import CORS
 from chat import chat_bp
+from wallet import wallet_app
+app.register_blueprint(wallet_app)
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
