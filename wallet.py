@@ -34,6 +34,8 @@ def rate_limit(max_calls=5, window=60):
         return wrapped
     return decorator
 
+from utils import decode_jwt
+
 # ── Auth middleware ──────────────────────────────────────
 def wallet_auth(f):
     @wraps(f)
@@ -42,13 +44,18 @@ def wallet_auth(f):
         if not token:
             return jsonify({"success": False, "error": "Unauthorized"}), 401
         try:
-            result = supabase.table("users").select("id,phone,is_banned").eq("token", token).single().execute()
-            if not result.data:
+            payload = decode_jwt(token)
+            user_id = payload.get("user_id")
+            if not user_id:
                 return jsonify({"success": False, "error": "Invalid token"}), 401
+            result = supabase.table("users").select("id,phone,is_banned").eq("id", user_id).single().execute()
+            if not result.data:
+                return jsonify({"success": False, "error": "User not found"}), 401
             if result.data.get("is_banned"):
                 return jsonify({"success": False, "error": "Account suspended"}), 403
             request.user = result.data
-        except:
+        except Exception as e:
+            print(f"Auth error: {e}")
             return jsonify({"success": False, "error": "Unauthorized"}), 401
         return f(*args, **kwargs)
     return decorated
