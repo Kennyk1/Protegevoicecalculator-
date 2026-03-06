@@ -71,17 +71,19 @@ def nowpay_headers():
 def create_nowpay_deposit(user_id, amount_usd=5):
     """Create a NOWPayments payment for USDT TRC20 deposit"""
     try:
-        res = requests.post(f"{NOWPAY_BASE}/payment", headers=nowpay_headers(), json={
+        payload = {
             "price_amount": amount_usd,
             "price_currency": "usd",
             "pay_currency": "usdttrc20",
             "order_id": str(user_id),
             "order_description": f"Protege Vault deposit for user {user_id}",
-            "ipn_callback_url": f"{os.environ.get('APP_URL', '')}/api/wallet/webhook/nowpayments"
-        })
+            "ipn_callback_url": f"{os.environ.get('APP_URL', 'https://sample-api-1-ryj7.onrender.com')}/api/wallet/webhook/nowpayments"
+        }
+        print(f"NOWPayments request: {payload}")
+        res = requests.post(f"{NOWPAY_BASE}/payment", headers=nowpay_headers(), json=payload)
+        print(f"NOWPayments response {res.status_code}: {res.text}")
         if res.status_code in [200, 201]:
             return res.json()
-        print(f"NOWPayments deposit error: {res.text}")
         return None
     except Exception as e:
         print(f"NOWPayments deposit exception: {e}")
@@ -209,15 +211,15 @@ def create_deposit():
     data = request.json or {}
     amount = float(data.get("amount", 5))
 
-    if amount < 1:
-        return jsonify({"success": False, "error": "Minimum deposit is $1 USDT"}), 400
+    if amount < 10:
+        return jsonify({"success": False, "error": "Minimum deposit is $10 USDT"}), 400
 
     user_id = request.user["id"]
 
     # Create NOWPayments payment
     payment = create_nowpay_deposit(user_id, amount)
     if not payment:
-        return jsonify({"success": False, "error": "Failed to create deposit. Try again."}), 500
+        return jsonify({"success": False, "error": "NOWPayments API failed. Check Render logs for details."}), 500
 
     payment_id = payment.get("payment_id")
     pay_address = payment.get("pay_address")
@@ -228,8 +230,8 @@ def create_deposit():
         "user_id": user_id,
         "type": "deposit",
         "amount": amount,
-        "status": "waiting",
-        "tx_hash": payment_id,
+        "status": "pending",
+        "tx_hash": str(payment_id),
         "asset": "USDT_TRC20",
         "destination": pay_address,
         "created_at": datetime.now(timezone.utc).isoformat()
