@@ -1,27 +1,23 @@
-from flask import Flask, request, jsonify
+from flask import Blueprint, request, jsonify
 from functools import wraps
 import os, hashlib, hmac, time, uuid, requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from supabase import create_client
 
-# ── Config ──────────────────────────────────────────────
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-TATUM_API_KEY = os.environ.get("TATUM_API_KEY")
-WALLET_SECRET = os.environ.get("WALLET_SECRET")
-TATUM_WEBHOOK_SECRET = os.environ.get("TATUM_WEBHOOK_SECRET", "")
+# ── Config from environment ──────────────────────────────
+SUPABASE_URL         = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY         = os.environ.get("SUPABASE_KEY")
+NOWPAY_API_KEY       = os.environ.get("NOWPAY_API_KEY")
+NOWPAY_IPN_SECRET    = os.environ.get("NOWPAY_IPN_SECRET")
+WALLET_SECRET        = os.environ.get("WALLET_SECRET")
+ADMIN_SECRET         = os.environ.get("ADMIN_SECRET")
 
-# Your master Tron wallet address (where all deposits go)
-MASTER_TRON_ADDRESS = os.environ.get("MASTER_TRON_ADDRESS", "")
-
-TATUM_BASE = "https://api.tatum.io/v3"
-TRON_NODE  = "https://tron-mainnet.gateway.tatum.io/jsonrpc/"
+NOWPAY_BASE = "https://api.nowpayments.io/v1"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+wallet = Blueprint("wallet", __name__)
 
-wallet_app = Flask(__name__)
-
-# ── Rate limiting (simple in-memory) ────────────────────
+# ── Rate limiting ────────────────────────────────────────
 rate_store = {}
 def rate_limit(max_calls=5, window=60):
     def decorator(f):
@@ -31,7 +27,7 @@ def rate_limit(max_calls=5, window=60):
             now = time.time()
             calls = [t for t in rate_store.get(key, []) if now - t < window]
             if len(calls) >= max_calls:
-                return jsonify({"success": False, "error": "Rate limit exceeded. Try again later."}), 429
+                return jsonify({"success": False, "error": "Too many requests. Try again later."}), 429
             calls.append(now)
             rate_store[key] = calls
             return f(*args, **kwargs)
@@ -39,14 +35,14 @@ def rate_limit(max_calls=5, window=60):
     return decorator
 
 # ── Auth middleware ──────────────────────────────────────
-def wallet_auth_required(f):
+def wallet_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = request.headers.get("Authorization", "").replace("Bearer ", "")
         if not token:
             return jsonify({"success": False, "error": "Unauthorized"}), 401
         try:
-            result = supabase.table("users").select("id,phone,balance,is_banned").eq("token", token).single().execute()
+            result = supabase.table("users").select("id,phone,is_banned").eq("token", token).single().execute()
             if not result.data:
                 return jsonify({"success": False, "error": "Invalid token"}), 401
             if result.data.get("is_banned"):
@@ -61,73 +57,69 @@ def wallet_auth_required(f):
 def hash_pin(pin):
     return hashlib.sha256((pin + WALLET_SECRET).encode()).hexdigest()
 
-# ── Tatum helpers ────────────────────────────────────────
-def tatum_headers():
-    return {"x-api-key": TATUM_API_KEY, "Content-Type": "application/json"}
+# ── NOWPayments helpers ──────────────────────────────────
+def nowpay_headers():
+    return {"x-api-key": NOWPAY_API_KEY, "Content-Type": "application/json"}
 
-def generate_tron_address(user_id):
-    """Generate a unique TRON deposit address for this user via Tatum"""
+def create_nowpay_deposit(user_id, amount_usd=5):
+    """Create a NOWPayments payment for USDT TRC20 deposit"""
     try:
-        # Use Tatum's offchain virtual accounts for USDT TRC20
-        # First create a virtual account
-        acc_res = requests.post(f"{TATUM_BASE}/offchain/account", headers=tatum_headers(), json={
-            "currency": "USDT_TRON",
-            "customer": {"externalId": str(user_id)},
-            "accountingCurrency": "USD"
+        res = requests.post(f"{NOWPAY_BASE}/payment", headers=nowpay_headers(), json={
+            "price_amount": amount_usd,
+            "price_currency": "usd",
+            "pay_currency": "usdttrc20",
+            "order_id": str(user_id),
+            "order_description": f"Protege Vault deposit for user {user_id}",
+            "ipn_callback_url": f"{os.environ.get('APP_URL', '')}/api/wallet/webhook/nowpayments"
         })
-        if acc_res.status_code not in [200, 201]:
-            # Fallback: generate raw Tron address
-            addr_res = requests.get(f"{TATUM_BASE}/tron/account", headers=tatum_headers())
-            if addr_res.status_code == 200:
-                data = addr_res.json()
-                return {"address": data.get("address"), "account_id": None}
-            return None
-
-        acc_data = acc_res.json()
-        account_id = acc_data.get("id")
-
-        # Generate deposit address for this virtual account
-        dep_res = requests.post(
-            f"{TATUM_BASE}/offchain/account/{account_id}/address",
-            headers=tatum_headers()
-        )
-        if dep_res.status_code in [200, 201]:
-            dep_data = dep_res.json()
-            return {
-                "address": dep_data.get("address"),
-                "account_id": account_id
-            }
+        if res.status_code in [200, 201]:
+            return res.json()
+        print(f"NOWPayments deposit error: {res.text}")
         return None
     except Exception as e:
-        print(f"Tatum address generation error: {e}")
+        print(f"NOWPayments deposit exception: {e}")
         return None
 
-def get_tron_usdt_balance(address):
-    """Get USDT TRC20 balance for an address"""
+def create_nowpay_payout(address, amount_usdt):
+    """Send USDT TRC20 to a wallet address via NOWPayments custody"""
     try:
-        res = requests.get(
-            f"{TATUM_BASE}/tron/account/{address}",
-            headers=tatum_headers()
-        )
-        if res.status_code == 200:
+        withdrawal_id = str(uuid.uuid4())
+        res = requests.post(f"{NOWPAY_BASE}/payout", headers=nowpay_headers(), json={
+            "withdrawals": [{
+                "address": address,
+                "currency": "usdttrc20",
+                "amount": str(amount_usdt),
+                "ipn_callback_url": f"{os.environ.get('APP_URL', '')}/api/wallet/webhook/nowpayments",
+                "unique_external_id": withdrawal_id
+            }]
+        })
+        if res.status_code in [200, 201]:
             data = res.json()
-            trc20 = data.get("trc20", [])
-            for token in trc20:
-                # USDT TRC20 contract: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
-                if "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" in token:
-                    raw = token.get("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "0")
-                    return float(raw) / 1_000_000  # USDT has 6 decimals
-        return 0.0
+            return {"success": True, "data": data, "withdrawal_id": withdrawal_id}
+        print(f"NOWPayments payout error: {res.text}")
+        return {"success": False, "error": res.text}
+    except Exception as e:
+        print(f"NOWPayments payout exception: {e}")
+        return {"success": False, "error": str(e)}
+
+def verify_ipn_signature(request_body, signature):
+    """Verify NOWPayments IPN webhook signature"""
+    try:
+        expected = hmac.new(
+            NOWPAY_IPN_SECRET.encode(),
+            request_body,
+            hashlib.sha512
+        ).hexdigest()
+        return hmac.compare_digest(expected, signature)
     except:
-        return 0.0
+        return False
 
 # ════════════════════════════════════════════════════════
-#  ROUTES
+#  PIN ROUTES
 # ════════════════════════════════════════════════════════
 
-# ── PIN Setup ────────────────────────────────────────────
-@wallet_app.route("/api/wallet/pin/setup", methods=["POST"])
-@wallet_auth_required
+@wallet.route("/api/wallet/pin/setup", methods=["POST"])
+@wallet_auth
 @rate_limit(max_calls=5, window=300)
 def setup_pin():
     data = request.json or {}
@@ -137,24 +129,22 @@ def setup_pin():
         return jsonify({"success": False, "error": "PIN must be exactly 6 digits"}), 400
 
     user_id = request.user["id"]
-
-    # Check if PIN already set
     existing = supabase.table("crypto_wallets").select("id,pin_hash").eq("user_id", user_id).execute()
+
     if existing.data and existing.data[0].get("pin_hash"):
-        return jsonify({"success": False, "error": "PIN already set. Use change PIN instead."}), 400
+        return jsonify({"success": False, "error": "PIN already set"}), 400
 
     pin_hash = hash_pin(pin)
-
     if existing.data:
         supabase.table("crypto_wallets").update({"pin_hash": pin_hash}).eq("user_id", user_id).execute()
     else:
         supabase.table("crypto_wallets").insert({"user_id": user_id, "pin_hash": pin_hash}).execute()
 
-    return jsonify({"success": True, "message": "PIN set successfully"})
+    return jsonify({"success": True, "message": "PIN created successfully"})
 
-# ── PIN Verify ───────────────────────────────────────────
-@wallet_app.route("/api/wallet/pin/verify", methods=["POST"])
-@wallet_auth_required
+
+@wallet.route("/api/wallet/pin/verify", methods=["POST"])
+@wallet_auth
 @rate_limit(max_calls=5, window=300)
 def verify_pin():
     data = request.json or {}
@@ -164,129 +154,134 @@ def verify_pin():
         return jsonify({"success": False, "error": "Invalid PIN format"}), 400
 
     user_id = request.user["id"]
-    result = supabase.table("crypto_wallets").select("pin_hash,locked_until,failed_attempts").eq("user_id", user_id).execute()
+    result = supabase.table("crypto_wallets").select(
+        "pin_hash,locked_until,failed_attempts"
+    ).eq("user_id", user_id).execute()
 
-    if not result.data:
-        return jsonify({"success": False, "error": "No PIN set. Please set a PIN first.", "needs_setup": True}), 400
+    if not result.data or not result.data[0].get("pin_hash"):
+        return jsonify({"success": False, "error": "No PIN set", "needs_setup": True}), 400
 
-    wallet = result.data[0]
+    wallet_row = result.data[0]
 
-    # Check if locked
-    locked_until = wallet.get("locked_until")
+    # Check lockout
+    locked_until = wallet_row.get("locked_until")
     if locked_until:
         locked_dt = datetime.fromisoformat(locked_until.replace("Z", "+00:00"))
         if datetime.now(timezone.utc) < locked_dt:
-            remaining = int((locked_dt - datetime.now(timezone.utc)).total_seconds() / 60)
-            return jsonify({"success": False, "error": f"Wallet locked. Try again in {remaining} minutes."}), 429
+            mins = int((locked_dt - datetime.now(timezone.utc)).total_seconds() / 60)
+            return jsonify({"success": False, "error": f"Wallet locked. Try again in {mins} minutes."}), 429
 
-    pin_hash = hash_pin(pin)
-    if wallet["pin_hash"] != pin_hash:
-        # Increment failed attempts
-        attempts = (wallet.get("failed_attempts") or 0) + 1
-        update_data = {"failed_attempts": attempts}
+    if wallet_row["pin_hash"] != hash_pin(pin):
+        attempts = (wallet_row.get("failed_attempts") or 0) + 1
+        update = {"failed_attempts": attempts}
         if attempts >= 5:
-            # Lock for 30 minutes
-            from datetime import timedelta
-            lock_until = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
-            update_data["locked_until"] = lock_until
-        supabase.table("crypto_wallets").update(update_data).eq("user_id", user_id).execute()
-        remaining_attempts = max(0, 5 - attempts)
-        return jsonify({"success": False, "error": f"Wrong PIN. {remaining_attempts} attempts remaining."}), 401
+            update["locked_until"] = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        supabase.table("crypto_wallets").update(update).eq("user_id", user_id).execute()
+        left = max(0, 5 - attempts)
+        return jsonify({"success": False, "error": f"Wrong PIN. {left} attempts left."}), 401
 
-    # Reset failed attempts on success
-    supabase.table("crypto_wallets").update({"failed_attempts": 0, "locked_until": None}).eq("user_id", user_id).execute()
-
-    # Generate short-lived wallet session token
+    # Reset on success + issue session token
     session_token = str(uuid.uuid4())
     supabase.table("crypto_wallets").update({
+        "failed_attempts": 0,
+        "locked_until": None,
         "session_token": session_token,
-        "session_expires": (datetime.now(timezone.utc).timestamp() + 1800)  # 30 min
+        "session_expires": int((datetime.now(timezone.utc) + timedelta(minutes=30)).timestamp())
     }).eq("user_id", user_id).execute()
 
     return jsonify({"success": True, "session_token": session_token})
 
-# ── Get/Create Deposit Address ───────────────────────────
-@wallet_app.route("/api/wallet/address", methods=["GET"])
-@wallet_auth_required
-def get_deposit_address():
+# ════════════════════════════════════════════════════════
+#  DEPOSIT ROUTES
+# ════════════════════════════════════════════════════════
+
+@wallet.route("/api/wallet/deposit/create", methods=["POST"])
+@wallet_auth
+@rate_limit(max_calls=10, window=60)
+def create_deposit():
+    data = request.json or {}
+    amount = float(data.get("amount", 5))
+
+    if amount < 1:
+        return jsonify({"success": False, "error": "Minimum deposit is $1 USDT"}), 400
+
     user_id = request.user["id"]
 
-    # Check for existing address
-    result = supabase.table("crypto_wallets").select("deposit_address,tatum_account_id").eq("user_id", user_id).execute()
+    # Create NOWPayments payment
+    payment = create_nowpay_deposit(user_id, amount)
+    if not payment:
+        return jsonify({"success": False, "error": "Failed to create deposit. Try again."}), 500
 
-    if result.data and result.data[0].get("deposit_address"):
-        return jsonify({
-            "success": True,
-            "address": result.data[0]["deposit_address"],
-            "network": "TRON (TRC20)",
-            "coin": "USDT"
-        })
+    payment_id = payment.get("payment_id")
+    pay_address = payment.get("pay_address")
+    pay_amount  = payment.get("pay_amount")
 
-    # Generate new address via Tatum
-    addr_data = generate_tron_address(user_id)
-    if not addr_data:
-        return jsonify({"success": False, "error": "Failed to generate address. Try again."}), 500
+    # Save pending deposit
+    supabase.table("crypto_transactions").insert({
+        "user_id": user_id,
+        "type": "deposit",
+        "amount": amount,
+        "status": "waiting",
+        "tx_hash": payment_id,
+        "asset": "USDT_TRC20",
+        "destination": pay_address,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }).execute()
 
-    # Save to database
-    update_data = {
-        "deposit_address": addr_data["address"],
-        "tatum_account_id": addr_data.get("account_id")
-    }
-    if result.data:
-        supabase.table("crypto_wallets").update(update_data).eq("user_id", user_id).execute()
+    # Save address to wallet row
+    existing = supabase.table("crypto_wallets").select("id").eq("user_id", user_id).execute()
+    if existing.data:
+        supabase.table("crypto_wallets").update({"deposit_address": pay_address}).eq("user_id", user_id).execute()
     else:
-        supabase.table("crypto_wallets").insert({"user_id": user_id, **update_data}).execute()
+        supabase.table("crypto_wallets").insert({"user_id": user_id, "deposit_address": pay_address}).execute()
 
     return jsonify({
         "success": True,
-        "address": addr_data["address"],
-        "network": "TRON (TRC20)",
-        "coin": "USDT"
+        "payment_id": payment_id,
+        "address": pay_address,
+        "amount": pay_amount,
+        "currency": "USDT TRC20",
+        "network": "TRON"
     })
 
-# ── Get Wallet Balance ───────────────────────────────────
-@wallet_app.route("/api/wallet/balance", methods=["GET"])
-@wallet_auth_required
+
+@wallet.route("/api/wallet/balance", methods=["GET"])
+@wallet_auth
 def get_balance():
     user_id = request.user["id"]
     result = supabase.table("crypto_wallets").select("usdt_balance,deposit_address").eq("user_id", user_id).execute()
-
     if not result.data:
         return jsonify({"success": True, "balance": 0.0, "coin": "USDT", "network": "TRC20"})
-
-    wallet = result.data[0]
-    balance = wallet.get("usdt_balance") or 0.0
-
     return jsonify({
         "success": True,
-        "balance": float(balance),
+        "balance": float(result.data[0].get("usdt_balance") or 0),
+        "address": result.data[0].get("deposit_address"),
         "coin": "USDT",
         "network": "TRC20"
     })
 
-# ── Transaction History ──────────────────────────────────
-@wallet_app.route("/api/wallet/transactions", methods=["GET"])
-@wallet_auth_required
+
+@wallet.route("/api/wallet/transactions", methods=["GET"])
+@wallet_auth
 def get_transactions():
     user_id = request.user["id"]
     result = supabase.table("crypto_transactions") \
-        .select("*") \
-        .eq("user_id", user_id) \
-        .order("created_at", desc=True) \
-        .limit(50) \
-        .execute()
-
+        .select("*").eq("user_id", user_id) \
+        .order("created_at", desc=True).limit(50).execute()
     return jsonify({"success": True, "transactions": result.data or []})
 
-# ── Withdrawal Request ───────────────────────────────────
-@wallet_app.route("/api/wallet/withdraw", methods=["POST"])
-@wallet_auth_required
+# ════════════════════════════════════════════════════════
+#  WITHDRAWAL ROUTES
+# ════════════════════════════════════════════════════════
+
+@wallet.route("/api/wallet/withdraw", methods=["POST"])
+@wallet_auth
 @rate_limit(max_calls=3, window=3600)
 def request_withdrawal():
     data = request.json or {}
-    amount = float(data.get("amount", 0))
-    withdraw_type = data.get("type", "crypto")  # "crypto" or "bank"
-    destination = data.get("destination", "").strip()  # wallet address or bank details
+    amount          = float(data.get("amount", 0))
+    withdraw_type   = data.get("type", "crypto")
+    destination     = data.get("destination", "").strip()
     idempotency_key = data.get("idempotency_key", str(uuid.uuid4()))
 
     user_id = request.user["id"]
@@ -296,144 +291,162 @@ def request_withdrawal():
     if not destination:
         return jsonify({"success": False, "error": "Destination is required"}), 400
 
-    # Check idempotency — prevent duplicate requests
+    # Idempotency check
     existing = supabase.table("crypto_withdrawal_requests") \
-        .select("id,status") \
-        .eq("idempotency_key", idempotency_key) \
-        .execute()
+        .select("id,status").eq("idempotency_key", idempotency_key).execute()
     if existing.data:
-        return jsonify({"success": True, "message": "Request already submitted", "status": existing.data[0]["status"]})
+        return jsonify({"success": True, "message": "Already submitted", "status": existing.data[0]["status"]})
 
-    # Check balance
-    wallet = supabase.table("crypto_wallets").select("usdt_balance").eq("user_id", user_id).execute()
-    if not wallet.data or (wallet.data[0].get("usdt_balance") or 0) < amount:
+    # Balance check
+    wallet_row = supabase.table("crypto_wallets").select("usdt_balance").eq("user_id", user_id).execute()
+    if not wallet_row.data or float(wallet_row.data[0].get("usdt_balance") or 0) < amount:
         return jsonify({"success": False, "error": "Insufficient balance"}), 400
 
-    # Create withdrawal request
+    # Deduct balance immediately
+    new_balance = float(wallet_row.data[0]["usdt_balance"]) - amount
+    supabase.table("crypto_wallets").update({"usdt_balance": new_balance}).eq("user_id", user_id).execute()
+
+    payout_result = None
+
+    # Auto payout for crypto withdrawals via NOWPayments
+    if withdraw_type == "crypto":
+        payout_result = create_nowpay_payout(destination, amount)
+
+    # Save withdrawal request
     supabase.table("crypto_withdrawal_requests").insert({
         "user_id": user_id,
         "amount": amount,
         "type": withdraw_type,
         "destination": destination,
-        "status": "pending",
+        "status": "processing" if (payout_result and payout_result.get("success")) else "pending",
         "idempotency_key": idempotency_key,
+        "nowpay_withdrawal_id": payout_result.get("withdrawal_id") if payout_result else None,
         "created_at": datetime.now(timezone.utc).isoformat()
     }).execute()
-
-    # Deduct balance immediately (hold)
-    new_balance = float(wallet.data[0]["usdt_balance"]) - amount
-    supabase.table("crypto_wallets").update({"usdt_balance": new_balance}).eq("user_id", user_id).execute()
 
     # Log transaction
     supabase.table("crypto_transactions").insert({
         "user_id": user_id,
         "type": "withdrawal",
         "amount": amount,
-        "status": "pending",
+        "status": "processing" if (payout_result and payout_result.get("success")) else "pending",
         "destination": destination,
         "withdraw_type": withdraw_type,
         "created_at": datetime.now(timezone.utc).isoformat()
     }).execute()
 
-    return jsonify({"success": True, "message": "Withdrawal request submitted. You will be notified when processed."})
+    if withdraw_type == "crypto" and payout_result and payout_result.get("success"):
+        return jsonify({"success": True, "message": "Withdrawal processing! USDT will arrive in your wallet shortly."})
+    elif withdraw_type == "bank":
+        return jsonify({"success": True, "message": "Bank withdrawal submitted! You will receive NGN within 24 hours."})
+    else:
+        return jsonify({"success": True, "message": "Withdrawal submitted and will be processed shortly."})
 
-# ── Tatum Webhook — detects incoming USDT deposits ──────
-@wallet_app.route("/api/wallet/webhook/tatum", methods=["POST"])
-def tatum_webhook():
-    # Verify webhook signature if secret is set
-    if TATUM_WEBHOOK_SECRET:
-        sig = request.headers.get("x-payload-hash", "")
-        expected = hmac.new(TATUM_WEBHOOK_SECRET.encode(), request.data, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected):
+# ════════════════════════════════════════════════════════
+#  NOWPAYMENTS WEBHOOK
+# ════════════════════════════════════════════════════════
+
+@wallet.route("/api/wallet/webhook/nowpayments", methods=["POST"])
+def nowpay_webhook():
+    # Verify signature
+    sig = request.headers.get("x-nowpayments-sig", "")
+    if NOWPAY_IPN_SECRET and sig:
+        if not verify_ipn_signature(request.data, sig):
+            print("Invalid NOWPayments webhook signature")
             return jsonify({"error": "Invalid signature"}), 401
 
     data = request.json or {}
-    print(f"Tatum webhook received: {data}")
+    print(f"NOWPayments webhook: {data}")
 
-    # Tatum sends: type, address, amount, txId, asset
-    tx_type = data.get("type", "")
-    address = data.get("address", "")
-    amount_raw = data.get("amount", 0)
-    tx_id = data.get("txId", "")
-    asset = data.get("asset", "")
+    payment_status  = data.get("payment_status", "")
+    payment_id      = str(data.get("payment_id", ""))
+    order_id        = data.get("order_id", "")  # this is user_id
+    actually_paid   = float(data.get("actually_paid", 0))
+    pay_currency    = data.get("pay_currency", "")
 
-    # Only process USDT TRC20 incoming
-    if "USDT" not in asset.upper() and "TRON" not in tx_type.upper():
-        return jsonify({"status": "ignored"}), 200
+    # Only process confirmed/finished deposits
+    if payment_status in ["finished", "confirmed", "partially_paid"]:
+        if not order_id or actually_paid <= 0:
+            return jsonify({"status": "ignored"}), 200
 
-    if not address or not tx_id:
-        return jsonify({"status": "missing data"}), 200
+        # Prevent duplicate processing
+        existing = supabase.table("crypto_transactions") \
+            .select("id").eq("tx_hash", payment_id).eq("status", "confirmed").execute()
+        if existing.data:
+            return jsonify({"status": "already processed"}), 200
 
-    # Prevent duplicate processing
-    existing_tx = supabase.table("crypto_transactions").select("id").eq("tx_hash", tx_id).execute()
-    if existing_tx.data:
-        return jsonify({"status": "already processed"}), 200
+        user_id = order_id
 
-    # Find user by deposit address
-    wallet_result = supabase.table("crypto_wallets").select("user_id,usdt_balance").eq("deposit_address", address).execute()
-    if not wallet_result.data:
-        print(f"No wallet found for address: {address}")
-        return jsonify({"status": "address not found"}), 200
+        # Credit balance
+        wallet_row = supabase.table("crypto_wallets").select("usdt_balance").eq("user_id", user_id).execute()
+        if wallet_row.data:
+            new_bal = float(wallet_row.data[0].get("usdt_balance") or 0) + actually_paid
+            supabase.table("crypto_wallets").update({
+                "usdt_balance": new_bal,
+                "last_deposit_at": datetime.now(timezone.utc).isoformat()
+            }).eq("user_id", user_id).execute()
+        else:
+            supabase.table("crypto_wallets").insert({
+                "user_id": user_id,
+                "usdt_balance": actually_paid,
+                "last_deposit_at": datetime.now(timezone.utc).isoformat()
+            }).execute()
 
-    wallet = wallet_result.data[0]
-    user_id = wallet["user_id"]
-    amount = float(amount_raw)
+        # Update transaction status
+        supabase.table("crypto_transactions").update({
+            "status": "confirmed",
+            "amount": actually_paid
+        }).eq("tx_hash", payment_id).execute()
 
-    # Update balance
-    new_balance = float(wallet.get("usdt_balance") or 0) + amount
-    supabase.table("crypto_wallets").update({
-        "usdt_balance": new_balance,
-        "last_deposit_at": datetime.now(timezone.utc).isoformat()
-    }).eq("user_id", user_id).execute()
+        print(f"Deposit confirmed: {actually_paid} USDT for user {user_id}")
 
-    # Log transaction
-    supabase.table("crypto_transactions").insert({
-        "user_id": user_id,
-        "type": "deposit",
-        "amount": amount,
-        "status": "confirmed",
-        "tx_hash": tx_id,
-        "asset": asset,
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }).execute()
+    # Handle payout/withdrawal webhook
+    elif payment_status in ["payout_completed"]:
+        withdrawal_id = data.get("unique_external_id", "")
+        if withdrawal_id:
+            supabase.table("crypto_withdrawal_requests").update({
+                "status": "approved"
+            }).eq("nowpay_withdrawal_id", withdrawal_id).execute()
+            supabase.table("crypto_transactions").update({
+                "status": "completed"
+            }).eq("withdraw_type", "crypto").eq("status", "processing").execute()
 
-    print(f"✅ Deposit confirmed: {amount} USDT for user {user_id}")
     return jsonify({"status": "ok"}), 200
 
-# ── Admin: approve/decline withdrawal ───────────────────
-@wallet_app.route("/api/wallet/admin/withdrawal/<req_id>", methods=["POST"])
-def admin_handle_withdrawal(req_id):
-    # Simple admin key check
-    admin_key = request.headers.get("x-admin-key", "")
-    if admin_key != os.environ.get("ADMIN_SECRET"):
+# ════════════════════════════════════════════════════════
+#  ADMIN ROUTE
+# ════════════════════════════════════════════════════════
+
+@wallet.route("/api/wallet/admin/withdrawal/<req_id>", methods=["POST"])
+def admin_withdrawal(req_id):
+    if request.headers.get("x-admin-key") != ADMIN_SECRET:
         return jsonify({"error": "Unauthorized"}), 401
 
-    data = request.json or {}
-    action = data.get("action")  # "approve" or "decline"
+    data   = request.json or {}
+    action = data.get("action")
 
     if action not in ["approve", "decline"]:
         return jsonify({"error": "Invalid action"}), 400
 
-    req_result = supabase.table("crypto_withdrawal_requests").select("*").eq("id", req_id).execute()
-    if not req_result.data:
-        return jsonify({"error": "Request not found"}), 404
+    req = supabase.table("crypto_withdrawal_requests").select("*").eq("id", req_id).execute()
+    if not req.data:
+        return jsonify({"error": "Not found"}), 404
 
-    wr = req_result.data[0]
+    wr = req.data[0]
 
     if action == "approve":
         supabase.table("crypto_withdrawal_requests").update({"status": "approved"}).eq("id", req_id).execute()
-        supabase.table("crypto_transactions").update({"status": "completed"}).eq("user_id", wr["user_id"]).eq("type", "withdrawal").eq("status", "pending").execute()
-        return jsonify({"success": True, "message": "Withdrawal approved"})
+        supabase.table("crypto_transactions").update({"status": "completed"}) \
+            .eq("user_id", wr["user_id"]).eq("type", "withdrawal").eq("status", "pending").execute()
+        return jsonify({"success": True, "message": "Approved"})
 
     elif action == "decline":
-        # Refund balance
-        wallet = supabase.table("crypto_wallets").select("usdt_balance").eq("user_id", wr["user_id"]).execute()
-        if wallet.data:
-            refunded = float(wallet.data[0].get("usdt_balance") or 0) + float(wr["amount"])
+        # Refund
+        w = supabase.table("crypto_wallets").select("usdt_balance").eq("user_id", wr["user_id"]).execute()
+        if w.data:
+            refunded = float(w.data[0].get("usdt_balance") or 0) + float(wr["amount"])
             supabase.table("crypto_wallets").update({"usdt_balance": refunded}).eq("user_id", wr["user_id"]).execute()
         supabase.table("crypto_withdrawal_requests").update({"status": "declined"}).eq("id", req_id).execute()
-        supabase.table("crypto_transactions").update({"status": "refunded"}).eq("user_id", wr["user_id"]).eq("type", "withdrawal").eq("status", "pending").execute()
-        return jsonify({"success": True, "message": "Withdrawal declined and refunded"})
-
-if __name__ == "__main__":
-    wallet_app.run(debug=True, port=5001)
+        supabase.table("crypto_transactions").update({"status": "refunded"}) \
+            .eq("user_id", wr["user_id"]).eq("type", "withdrawal").eq("status", "pending").execute()
+        return jsonify({"success": True, "message": "Declined and refunded"})
