@@ -6,4 +6,3 @@ PyJWT==2.8.0
 passlib[bcrypt]==1.7.4
 gunicorn
 flask_cors
-google-genai
