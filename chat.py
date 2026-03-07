@@ -1,15 +1,15 @@
 import os
+import requests
 from flask import Blueprint, request, jsonify
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY
 from utils import decode_jwt
-from google import genai
-from google.genai import types
 
 chat_bp = Blueprint("chat", __name__)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+GEMINI_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 SYSTEM_PROMPT = """You are Protege, an AI-powered voice calculator and academic assistant. 
 You specialise in:
@@ -58,8 +58,7 @@ def get_history(user_id, limit=20):
             .limit(limit)
             .execute()
         )
-        messages = list(reversed(rows.data))
-        return messages
+        return list(reversed(rows.data))
     except Exception:
         return []
 
@@ -75,31 +74,37 @@ def save_message(user_id, role, content):
 
 # --- AI Call ---
 def call_ai(messages):
-    """
-    Uses Google Gemini to generate a response.
-    Fixed to use correct google-genai SDK syntax.
-    """
-    client = genai.Client(api_key=OPENROUTER_API_KEY)
-
-    
     contents = []
     for m in messages:
-        
         role = "user" if m["role"] == "user" else "model"
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m["content"])]))
+        contents.append({
+            "role": role,
+            "parts": [{"text": m["content"]}]
+        })
 
-    
-    response = client.models.generate_content(
-        model="gemini-1.5-flash", 
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            max_output_tokens=1024,
-            temperature=0.7
-        )
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": SYSTEM_PROMPT}]
+        },
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": 1024,
+            "temperature": 0.7
+        }
+    }
+
+    res = requests.post(
+        f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+        json=payload,
+        timeout=30
     )
 
-    return response.text
+    if res.status_code != 200:
+        print(f"❌ Gemini error {res.status_code}: {res.text}")
+        raise Exception(f"Gemini API error: {res.status_code}")
+
+    data = res.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"]
 
 # --- Routes ---
 @chat_bp.route("/api/chat", methods=["POST"])
@@ -118,18 +123,15 @@ def chat():
 
     user_id = user["id"]
     save_message(user_id, "user", user_message)
-
     history = get_history(user_id, limit=20)
 
     try:
         reply = call_ai(history)
     except Exception as e:
-        
         print(f"❌ AI error: {e}")
         return jsonify({"success": False, "message": "AI service error. Try again shortly."}), 502
 
     save_message(user_id, "assistant", reply)
-
     return jsonify({"success": True, "reply": reply})
 
 @chat_bp.route("/api/chat/history", methods=["GET"])
