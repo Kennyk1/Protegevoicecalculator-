@@ -8,11 +8,15 @@ from utils import create_jwt, decode_jwt
 from flask_cors import CORS
 from chat import chat_bp
 from wallet import wallet
+from leader import leader_bp
+from game_server import game_bp
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 app.register_blueprint(chat_bp)
 app.register_blueprint(wallet)
+app.register_blueprint(leader_bp)
+app.register_blueprint(game_bp)
 
 print("🚀 APP STARTING...")
 
